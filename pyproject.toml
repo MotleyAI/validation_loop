@@ -1,0 +1,64 @@
+[project]
+name = "validation-loop"
+version = "0.1.0"
+description = "LLM structured output with automatic retry on validation failure"
+authors = [{name = "MotleyAI"}]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+keywords = ["llm", "validation", "pydantic", "structured-output", "retry"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "tenacity>=9.0.0",
+    # Instructor 1.10+ eagerly imports all provider shims at top-level `import
+    # instructor`, which breaks when some optional providers aren't fully installed.
+    # We shim missing provider symbols at import time; see _import_instructor_with_stubs().
+    "instructor>=1.15.0",
+    # Versions 1.82.7 and 1.82.8 were compromised (TeamPCP supply-chain attack,
+    # March 2026) and removed from PyPI. 1.83.0+ uses a new secure CI/CD pipeline.
+    "litellm>=1.83.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.39.0"]
+cohere = ["cohere>=5.0.0"]
+mistral = ["mistralai>=1.0.0"]
+google = ["google-generativeai>=0.8.0"]
+all = [
+    "openai>=1.0.0",
+    "anthropic>=0.39.0",
+    "cohere>=5.0.0",
+    "mistralai>=1.0.0",
+    "google-generativeai>=0.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/MotleyAI/validation_loop"
+Repository = "https://github.com/MotleyAI/validation_loop"
+
+[tool.poetry]
+packages = [{include = "validation_loop"}]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-cov = "^4.1.0"
+
+[tool.pytest.ini_options]
+markers = ["integration: tests that call real LLM APIs (deselect with '-m \"not integration\"')"]
+addopts = "-m 'not integration'"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

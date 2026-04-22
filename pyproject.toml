@@ -1,6 +1,6 @@
 [project]
 name = "validation-loop"
-version = "0.1.0"
+version = "0.1.1"
 description = "LLM structured output with automatic retry on validation failure"
 authors = [{name = "MotleyAI"}]
 license = "MIT"

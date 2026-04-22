@@ -1,5 +1,7 @@
 # validation_loop
 
+![Validation loop diagram](https://raw.githubusercontent.com/MotleyAI/validation_loop/main/validation_loop_diagram.png)
+
 LLM structured output with automatic retry on validation failure.
 
 `validation_loop` sends a prompt to any LLM, forces the response into a Pydantic model, runs your custom validation logic, and retries automatically if validation fails -- feeding the error back to the LLM so it can self-correct.

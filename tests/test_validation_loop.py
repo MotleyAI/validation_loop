@@ -3,13 +3,14 @@
 All tests mock the instructor/litellm layer to avoid real LLM calls.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import tenacity
 from pydantic import BaseModel, ValidationError, field_validator
 
-from validation_loop import val_loop, validation_loop
+from validation_loop import ImageURL, val_loop, validation_loop
+from validation_loop.validation_loop import _normalize_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +31,7 @@ class MovieReview(BaseModel):
         return v
 
 
-SAMPLE_MESSAGES = [{"role": "user", "content": "Review the movie Inception."}]
+SAMPLE_PROMPT = "Review the movie Inception."
 
 
 def _make_mock_client(side_effects):
@@ -41,7 +42,7 @@ def _make_mock_client(side_effects):
     - An exception -> raised by create()
 
     Because instructor internally creates a WrappedSchema (a dynamic subclass of the
-    user's schema that runs model_post_init → validation_callable), we simulate this by
+    user's schema that runs model_post_init -> validation_callable), we simulate this by
     having the mock call the response_model constructor with the provided field values.
     """
     call_index = 0
@@ -68,6 +69,55 @@ def _make_mock_client(side_effects):
 
 
 # ---------------------------------------------------------------------------
+# _normalize_prompt unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizePrompt:
+    def test_string(self):
+        result = _normalize_prompt("Hello")
+        assert result == [{"role": "user", "content": "Hello"}]
+
+    def test_message_list_passthrough(self):
+        msgs = [{"role": "system", "content": "Be helpful"}, {"role": "user", "content": "Hi"}]
+        result = _normalize_prompt(msgs)
+        assert result is msgs
+
+    def test_mixed_list_text_only(self):
+        result = _normalize_prompt(["First part", "Second part"])
+        assert result == [{"role": "user", "content": [
+            {"type": "text", "text": "First part"},
+            {"type": "text", "text": "Second part"},
+        ]}]
+
+    def test_mixed_list_with_path(self, tmp_path):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        result = _normalize_prompt(["Describe this", img])
+        assert len(result) == 1
+        assert result[0]["role"] == "user"
+        blocks = result[0]["content"]
+        assert blocks[0] == {"type": "text", "text": "Describe this"}
+        assert blocks[1]["type"] == "image_url"
+        assert blocks[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_mixed_list_with_image_url(self):
+        result = _normalize_prompt(["Describe this", ImageURL(url="https://example.com/img.jpg")])
+        assert len(result) == 1
+        blocks = result[0]["content"]
+        assert blocks[0] == {"type": "text", "text": "Describe this"}
+        assert blocks[1] == {"type": "image_url", "image_url": {"url": "https://example.com/img.jpg"}}
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            _normalize_prompt([])
+
+    def test_unsupported_type_raises(self):
+        with pytest.raises(TypeError, match="Unsupported"):
+            _normalize_prompt([123])  # type: ignore[list-item]
+
+
+# ---------------------------------------------------------------------------
 # validation_loop() function form
 # ---------------------------------------------------------------------------
 
@@ -86,11 +136,35 @@ class TestValidationLoopFunction:
             mock_instructor.from_litellm.return_value = mock_client
             result = validation_loop(
                 schema=MovieReview,
-                messages=SAMPLE_MESSAGES,
+                prompt=SAMPLE_PROMPT,
                 validation_callable=validator,
             )
 
         assert result == {"title": "INCEPTION", "rating": 9.0}
+
+    def test_string_prompt(self):
+        """A plain string is converted to a single user message."""
+        review_data = {"title": "Inception", "rating": 9.0, "summary": "A mind-bending thriller about dreams within dreams."}
+        captured = {}
+
+        def fake_create(*, model, response_model, messages, max_retries, **kwargs):
+            captured["messages"] = messages
+            for attempt in max_retries:
+                with attempt:
+                    return response_model(**review_data)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = fake_create
+
+        with patch("validation_loop.validation_loop.instructor") as mock_instructor:
+            mock_instructor.from_litellm.return_value = mock_client
+            validation_loop(
+                schema=MovieReview,
+                prompt="Review the movie Inception.",
+                validation_callable=lambda r: r,
+            )
+
+        assert captured["messages"] == [{"role": "user", "content": "Review the movie Inception."}]
 
     def test_retry_on_validation_error_then_success(self):
         """First attempt fails validation, second succeeds."""
@@ -111,7 +185,7 @@ class TestValidationLoopFunction:
             mock_instructor.from_litellm.return_value = mock_client
             result = validation_loop(
                 schema=MovieReview,
-                messages=SAMPLE_MESSAGES,
+                prompt=SAMPLE_PROMPT,
                 validation_callable=validator,
                 max_attempts=3,
                 retry_exceptions=(ValidationError,),
@@ -133,7 +207,7 @@ class TestValidationLoopFunction:
             with pytest.raises(RuntimeError, match="validation_loop failed after 2 attempts"):
                 validation_loop(
                     schema=MovieReview,
-                    messages=SAMPLE_MESSAGES,
+                    prompt=SAMPLE_PROMPT,
                     validation_callable=validator,
                     max_attempts=2,
                     retry_exceptions=(ValueError,),
@@ -142,10 +216,10 @@ class TestValidationLoopFunction:
     def test_custom_model(self):
         """Model string is forwarded to the client."""
         review_data = {"title": "Inception", "rating": 9.0, "summary": "A mind-bending thriller about dreams within dreams."}
-        captured_model = {}
+        captured = {}
 
         def fake_create(*, model, response_model, messages, max_retries, **kwargs):
-            captured_model["model"] = model
+            captured["model"] = model
             for attempt in max_retries:
                 with attempt:
                     return response_model(**review_data)
@@ -157,12 +231,12 @@ class TestValidationLoopFunction:
             mock_instructor.from_litellm.return_value = mock_client
             validation_loop(
                 schema=MovieReview,
-                messages=SAMPLE_MESSAGES,
+                prompt=SAMPLE_PROMPT,
                 validation_callable=lambda r: r,
                 model="anthropic/claude-sonnet-4-20250514",
             )
 
-        assert captured_model["model"] == "anthropic/claude-sonnet-4-20250514"
+        assert captured["model"] == "anthropic/claude-sonnet-4-20250514"
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +256,7 @@ class TestValLoopDecorator:
         mock_client = _make_mock_client([review_data])
         with patch("validation_loop.validation_loop.instructor") as mock_instructor:
             mock_instructor.from_litellm.return_value = mock_client
-            result = process_review(messages=SAMPLE_MESSAGES)
+            result = process_review(prompt=SAMPLE_PROMPT)
 
         assert result == {"title": "MATRIX"}
 
@@ -197,7 +271,7 @@ class TestValLoopDecorator:
         mock_client = _make_mock_client([review_data])
         with patch("validation_loop.validation_loop.instructor") as mock_instructor:
             mock_instructor.from_litellm.return_value = mock_client
-            result = process_review(messages=SAMPLE_MESSAGES)
+            result = process_review(prompt=SAMPLE_PROMPT)
 
         assert result == {"title": "MATRIX"}
 
@@ -221,7 +295,7 @@ class TestValLoopDecorator:
 
         with patch("validation_loop.validation_loop.instructor") as mock_instructor:
             mock_instructor.from_litellm.return_value = mock_client
-            process_review(messages=SAMPLE_MESSAGES, model="anthropic/claude-sonnet-4-20250514")
+            process_review(prompt=SAMPLE_PROMPT, model="anthropic/claude-sonnet-4-20250514")
 
         assert captured["model"] == "anthropic/claude-sonnet-4-20250514"
 
@@ -250,7 +324,7 @@ class TestValLoopDecorator:
         mock_client = _make_mock_client([bad_data, good_data])
         with patch("validation_loop.validation_loop.instructor") as mock_instructor:
             mock_instructor.from_litellm.return_value = mock_client
-            result = process_review(messages=SAMPLE_MESSAGES)
+            result = process_review(prompt=SAMPLE_PROMPT)
 
         assert result == {"title": "MATRIX"}
 

@@ -1,13 +1,24 @@
+import base64
 import functools
 import importlib
 import inspect
+import mimetypes
 import re
 import sys
 import types
-from typing import Any, Callable, Type, TypeVar, get_type_hints
+from pathlib import Path
+from typing import Any, Callable, Type, TypeVar, Union, get_type_hints
 
 import tenacity
 from pydantic import BaseModel, ValidationError
+
+
+class ImageURL(BaseModel):
+    """Wraps a URL string to mark it as an image in a prompt list."""
+    url: str
+
+
+Prompt = Union[str, list[Union[str, Path, ImageURL, dict]]]
 
 
 # ---------------------------------------------------------------------------
@@ -75,15 +86,60 @@ _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_RETRY_EXCEPTIONS: tuple[Type[Exception], ...] = (ValidationError,)
 
 
+def _encode_image(path: Path) -> dict:
+    """Read an image file, base64-encode it, and return an image_url content block."""
+    data = path.read_bytes()
+    b64 = base64.b64encode(data).decode("ascii")
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+    }
+
+
+def _normalize_prompt(prompt: Prompt) -> list[dict]:
+    """Convert a Prompt (str, or list of str/Path/ImageURL/dict) into OpenAI messages."""
+    if isinstance(prompt, str):
+        return [{"role": "user", "content": prompt}]
+
+    if not isinstance(prompt, list) or len(prompt) == 0:
+        raise ValueError("prompt must be a non-empty string or list")
+
+    # If the first element is a dict with a "role" key, treat the whole list
+    # as a standard OpenAI message list and pass through.
+    if isinstance(prompt[0], dict) and "role" in prompt[0]:
+        return prompt  # type: ignore[return-value]
+
+    # Otherwise, assemble a single user message from mixed content blocks.
+    content_blocks: list[dict] = []
+    for item in prompt:
+        if isinstance(item, str):
+            content_blocks.append({"type": "text", "text": item})
+        elif isinstance(item, Path):
+            content_blocks.append(_encode_image(item))
+        elif isinstance(item, ImageURL):
+            content_blocks.append({
+                "type": "image_url",
+                "image_url": {"url": item.url},
+            })
+        elif isinstance(item, dict):
+            content_blocks.append(item)
+        else:
+            raise TypeError(f"Unsupported prompt list item type: {type(item)!r}")
+
+    return [{"role": "user", "content": content_blocks}]
+
+
 def _run_validation_loop(
     schema: Type[T],
-    messages: list[dict],
+    prompt: Prompt,
     validation_callable: Callable[[T], Any],
     model: str = _DEFAULT_MODEL,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     retry_exceptions: tuple[Type[Exception], ...] = _DEFAULT_RETRY_EXCEPTIONS,
 ) -> Any:
     """Core implementation shared by validation_loop() and val_loop decorator."""
+    messages = _normalize_prompt(prompt)
     client = instructor.from_litellm(completion)
 
     # Wrap the Pydantic schema to also run the validation callable,
@@ -119,22 +175,26 @@ def _run_validation_loop(
 
 def validation_loop(
     schema: Type[T],
-    messages: list[dict],
+    prompt: Prompt,
     validation_callable: Callable[[T], Any],
     model: str = _DEFAULT_MODEL,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     retry_exceptions: tuple[Type[Exception], ...] = _DEFAULT_RETRY_EXCEPTIONS,
 ) -> Any:
     """
-    Feed messages to an LLM, forcing it to return a valid instance of `schema`.
+    Feed a prompt to an LLM, forcing it to return a valid instance of `schema`.
     On each attempt, the result is passed to `validation_callable`.
     If it raises, the exception text is appended to the conversation and the LLM retries.
     Returns the return value of `validation_callable` on success.
 
     Args:
         schema:               Pydantic model class defining the expected output shape.
-        messages:             OpenAI-style message list, e.g. [{"role": "user", "content": "..."}].
-                              May include image content blocks for vision models.
+        prompt:               A plain string (sent as a single user message), or a list.
+                              Lists can contain str, Path (image file), ImageURL (image URL),
+                              or dicts. If the first element is a dict with a "role" key,
+                              the list is treated as a standard OpenAI message list.
+                              Otherwise, items are assembled into a single user message
+                              with text and image content blocks.
         validation_callable:  Called with the validated Pydantic instance. Its return value
                               is returned on success; any exception triggers a retry.
         model:                LiteLLM model string (supports all providers).
@@ -143,7 +203,7 @@ def validation_loop(
                               (covers Pydantic field/model validators). Add your own custom
                               exception classes to catch business-rule failures too.
     """
-    return _run_validation_loop(schema, messages, validation_callable, model, max_attempts, retry_exceptions)
+    return _run_validation_loop(schema, prompt, validation_callable, model, max_attempts, retry_exceptions)
 
 
 def _extract_schema(func: Callable) -> Type[BaseModel]:
@@ -191,7 +251,7 @@ def val_loop(
                 raise ValueError("Summary too short")
             return {"title": review.title.upper()}
 
-        result = process_review(messages=[{"role": "user", "content": "..."}])
+        result = process_review(prompt="Review the movie Inception.")
 
     Can also be used without arguments::
 
@@ -200,7 +260,7 @@ def val_loop(
             ...
 
     The wrapped function accepts:
-        messages:          Required. OpenAI-style message list.
+        prompt:            Required. A string, or a list (see validation_loop docs).
         model:             Override the model set at decoration time.
         max_attempts:      Override max_attempts set at decoration time.
         retry_exceptions:  Override retry_exceptions set at decoration time.
@@ -210,13 +270,13 @@ def val_loop(
 
         @functools.wraps(fn)
         def wrapper(
-            messages: list[dict],
+            prompt: Prompt,
             *,
             model: str = model,
             max_attempts: int = max_attempts,
             retry_exceptions: tuple[Type[Exception], ...] = retry_exceptions,
         ) -> Any:
-            return _run_validation_loop(schema, messages, fn, model, max_attempts, retry_exceptions)
+            return _run_validation_loop(schema, prompt, fn, model, max_attempts, retry_exceptions)
 
         return wrapper
 
@@ -257,12 +317,7 @@ if __name__ == "__main__":
 
     output = validation_loop(
         schema=MovieReview,
-        messages=[
-            {
-                "role": "user",
-                "content": "Review the movie Inception in one short sentence.",
-            }
-        ],
+        prompt="Review the movie Inception in one short sentence.",
         validation_callable=validate_and_transform,
         model="openai/gpt-4.1-mini",
         max_attempts=3,
@@ -282,11 +337,6 @@ if __name__ == "__main__":
         }
 
     output = process_movie_review(
-        messages=[
-            {
-                "role": "user",
-                "content": "Review the movie The Matrix in one short sentence.",
-            }
-        ],
+        prompt="Review the movie The Matrix in one short sentence.",
     )
     print("Decorator form:", output)

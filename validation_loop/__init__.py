@@ -2,6 +2,6 @@
 
 __version__ = "0.1.0"
 
-from validation_loop.validation_loop import val_loop, validation_loop
+from validation_loop.validation_loop import ImageURL, Prompt, val_loop, validation_loop
 
-__all__ = ["validation_loop", "val_loop"]
+__all__ = ["validation_loop", "val_loop", "ImageURL", "Prompt"]

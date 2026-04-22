@@ -40,7 +40,7 @@ class MovieReview(BaseModel):
 
 def validate_review(review: MovieReview) -> dict:
     """Business logic that runs after Pydantic validation.
-    Raise any exception to trigger a retry."""
+    Raise an exception listed in retry_exceptions to trigger a retry."""
     if len(review.summary) < 20:
         raise ValueError("Summary is too short to be useful")
     return {
@@ -52,7 +52,7 @@ def validate_review(review: MovieReview) -> dict:
 
 result = validation_loop(
     schema=MovieReview,
-    messages=[{"role": "user", "content": "Review the movie Inception."}],
+    prompt="Review the movie Inception in one short sentence.",
     validation_callable=validate_review,
     model="openai/gpt-4.1-mini",        # any LiteLLM model string
     max_attempts=3,
@@ -82,12 +82,12 @@ def review_movie(review: MovieReview) -> dict:
     return {"title": review.title.upper(), "rating": review.rating}
 
 
-# Call it with messages:
-result = review_movie(messages=[{"role": "user", "content": "Review Inception."}])
+# Call it with a prompt:
+result = review_movie(prompt="Review the movie Inception.")
 
 # Override settings at call time:
 result = review_movie(
-    messages=[{"role": "user", "content": "Review The Matrix."}],
+    prompt="Review The Matrix.",
     model="anthropic/claude-sonnet-4-20250514",
     max_attempts=5,
 )
@@ -101,6 +101,10 @@ def review_movie(review: MovieReview) -> dict:
     return {"title": review.title}
 ```
 
+## Prompt formats
+
+The `prompt` parameter accepts a plain string (shown above) or a list for more advanced use cases -- multi-turn conversations, images from local files, and image URLs. See [PROMPT_FORMATS.md](PROMPT_FORMATS.md) for details and examples.
+
 ## How it works
 
 1. Your Pydantic schema is wrapped in a subclass that runs `validation_callable` inside `model_post_init`, so both Pydantic validation errors and your custom errors are visible to Instructor's retry loop.
@@ -110,12 +114,12 @@ def review_movie(review: MovieReview) -> dict:
 
 ## API reference
 
-### `validation_loop(schema, messages, validation_callable, ...)`
+### `validation_loop(schema, prompt, validation_callable, ...)`
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `schema` | `Type[BaseModel]` | required | Pydantic model defining the expected output |
-| `messages` | `list[dict]` | required | OpenAI-style message list |
+| `prompt` | `str \| list` | required | See [Prompt formats](PROMPT_FORMATS.md) |
 | `validation_callable` | `Callable` | required | Called with the model instance; return value is returned on success |
 | `model` | `str` | `"openai/gpt-4.1-mini"` | Any [LiteLLM model string](https://docs.litellm.ai/docs/providers) |
 | `max_attempts` | `int` | `3` | Max LLM calls before giving up |
@@ -125,7 +129,15 @@ def review_movie(review: MovieReview) -> dict:
 
 Decorator arguments: `model`, `max_attempts`, `retry_exceptions` (same defaults as above).
 
-The decorated function accepts: `messages` (required), plus optional keyword overrides for `model`, `max_attempts`, `retry_exceptions`.
+The decorated function accepts: `prompt` (required), plus optional keyword overrides for `model`, `max_attempts`, `retry_exceptions`.
+
+### `ImageURL`
+
+```python
+from validation_loop import ImageURL
+```
+
+A simple wrapper marking a URL string as an image for use in prompt lists. See [PROMPT_FORMATS.md](PROMPT_FORMATS.md).
 
 ## License
 
